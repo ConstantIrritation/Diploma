@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .weight_init import kaiming_init, constant_init
 from damo.utils import make_divisible
 
+from damo.base_models.backbones.BN import MyBatchNorm2d
 
 class SiLU(nn.Module):
     """export-friendly version of nn.SiLU()"""
@@ -58,9 +59,9 @@ def get_activation(name='silu', inplace=True):
         raise AttributeError('Unsupported act type: {}'.format(name))
 
 
-def get_norm(name, out_channels):
+def get_norm(name, out_channels, track_running_stats):
     if name == 'bn':
-        module = nn.BatchNorm2d(out_channels)
+        module = nn.BatchNorm2d(out_channels, track_running_stats=track_running_stats)
     elif name == 'gn':
         module = nn.GroupNorm(out_channels)
     else:
@@ -81,6 +82,7 @@ class ConvBNAct(nn.Module):
         act='silu',
         norm='bn',
         reparam=False,
+        track_running_stats=True
     ):
         super().__init__()
         # same padding
@@ -95,7 +97,7 @@ class ConvBNAct(nn.Module):
             bias=bias,
         )
         if norm is not None:
-            self.bn = get_norm(norm, out_channels)
+            self.bn = get_norm(norm, out_channels, track_running_stats)
         if act is not None:
             self.act = get_activation(act, inplace=True)
         self.with_norm = norm is not None
@@ -119,14 +121,16 @@ class SPPBottleneck(nn.Module):
                  in_channels,
                  out_channels,
                  kernel_sizes=(5, 9, 13),
-                 activation='silu'):
+                 activation='silu',
+                 track_running_stats=True):
         super().__init__()
         hidden_channels = in_channels // 2
         self.conv1 = ConvBNAct(in_channels,
                                hidden_channels,
                                1,
                                stride=1,
-                               act=activation)
+                               act=activation,
+                               track_running_stats=track_running_stats)
         self.m = nn.ModuleList([
             nn.MaxPool2d(kernel_size=ks, stride=1, padding=ks // 2)
             for ks in kernel_sizes
@@ -136,7 +140,8 @@ class SPPBottleneck(nn.Module):
                                out_channels,
                                1,
                                stride=1,
-                               act=activation)
+                               act=activation,
+                               track_running_stats=track_running_stats)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -156,13 +161,15 @@ class Focus(nn.Module):
                  out_channels,
                  ksize=1,
                  stride=1,
-                 act='silu'):
+                 act='silu',
+                 track_running_stats=True):
         super().__init__()
         self.conv = ConvBNAct(in_channels * 4,
                               out_channels,
                               ksize,
                               stride,
-                              act=act)
+                              act=act,
+                              track_running_stats=track_running_stats)
 
     def forward(self, x):
         # shape of x (b,c,w,h) -> y(b,4c,w/2,h/2)
@@ -219,7 +226,8 @@ class MobileV3Block(nn.Module):
                  act='silu',
                  reparam=False,
                  block_type='k1kx',
-                 depthwise=False,):
+                 depthwise=False,
+                 track_running_stats=True):
         super(MobileV3Block, self).__init__()
         self.stride = stride
         self.exp_ratio = 3.0
@@ -237,7 +245,7 @@ class MobileV3Block(nn.Module):
                 padding=0,
                 bias=False,
             ),
-            nn.BatchNorm2d(branch_features),
+            nn.BatchNorm2d(branch_features, track_running_stats=track_running_stats),
             get_activation(act),
             depthwise_conv(
                 branch_features,
@@ -246,7 +254,7 @@ class MobileV3Block(nn.Module):
                 stride=self.stride,
                 padding=2,
             ),
-            nn.BatchNorm2d(branch_features),
+            nn.BatchNorm2d(branch_features, track_running_stats=track_running_stats),
             get_activation(act),
             nn.Conv2d(
                 branch_features,
@@ -256,7 +264,7 @@ class MobileV3Block(nn.Module):
                 padding=0,
                 bias=False,
             ),
-            nn.BatchNorm2d(out_c),
+            nn.BatchNorm2d(out_c, track_running_stats=track_running_stats),
         )
         self.use_shotcut = self.stride == 1 and in_c == out_c
 
@@ -277,16 +285,17 @@ class BasicBlock_3x3_Reverse(nn.Module):
                  ch_out,
                  act='relu',
                  shortcut=True,
-                 depthwise=False):
+                 depthwise=False,
+                 track_running_stats=True):
         super(BasicBlock_3x3_Reverse, self).__init__()
         assert ch_in == ch_out
         ch_hidden = int(ch_in * ch_hidden_ratio)
         if not depthwise:
-            self.conv1 = ConvBNAct(ch_hidden, ch_out, 3, stride=1, act=act)
-            self.conv2 = RepConv(ch_in, ch_hidden, 3, stride=1, act=act)
+            self.conv1 = ConvBNAct(ch_hidden, ch_out, 3, stride=1, act=act, track_running_stats=track_running_stats)
+            self.conv2 = RepConv(ch_in, ch_hidden, 3, stride=1, act=act, track_running_stats=track_running_stats)
         else:
             self.conv = MobileV3Block(in_c=ch_in, out_c=ch_out, btn_c=None,
-                kernel_size=5, stride=1, act=act)
+                kernel_size=5, stride=1, act=act, track_running_stats=track_running_stats)
 
 
         self.shortcut = shortcut
@@ -319,6 +328,7 @@ class DepthwiseConv(nn.Module):
         act="ReLU",
         inplace=True,
         order=("depthwise", "dwnorm", "act", "pointwise", "pwnorm", "act"),
+        track_running_stats=True
     ):
         super(DepthwiseConv, self).__init__()
         assert act is None or isinstance(act, str)
@@ -362,9 +372,9 @@ class DepthwiseConv(nn.Module):
         if self.with_norm:
             # norm layer is after conv layer
             if 'dwnorm' in self.order:
-                self.dwnorm = get_norm(norm_cfg, in_channels)
+                self.dwnorm = get_norm(norm_cfg, in_channels, track_running_stats=track_running_stats)
             if 'pwnorm' in self.order:
-                self.pwnorm = get_norm(norm_cfg, out_channels)
+                self.pwnorm = get_norm(norm_cfg, out_channels, track_running_stats=track_running_stats)
 
         # build activation layer
         if self.act:
@@ -407,6 +417,7 @@ class SPP(nn.Module):
         k,
         pool_size,
         act='swish',
+        track_running_stats=True,
     ):
         super(SPP, self).__init__()
         self.pool = []
@@ -417,7 +428,7 @@ class SPP(nn.Module):
                                 ceil_mode=False)
             self.add_module('pool{}'.format(i), pool)
             self.pool.append(pool)
-        self.conv = ConvBNAct(ch_in, ch_out, k, act=act)
+        self.conv = ConvBNAct(ch_in, ch_out, k, act=act, track_running_stats=track_running_stats)
 
     def forward(self, x):
         outs = [x]
@@ -439,14 +450,15 @@ class CSPStage(nn.Module):
                  n,
                  act='swish',
                  spp=False,
-                 depthwise=False):
+                 depthwise=False,
+                 track_running_stats=True):
         super(CSPStage, self).__init__()
 
         split_ratio = 2
         ch_first = int(ch_out // split_ratio)
         ch_mid = int(ch_out - ch_first)
-        self.conv1 = ConvBNAct(ch_in, ch_first, 1, act=act)
-        self.conv2 = ConvBNAct(ch_in, ch_mid, 1, act=act)
+        self.conv1 = ConvBNAct(ch_in, ch_first, 1, act=act, track_running_stats=track_running_stats)
+        self.conv2 = ConvBNAct(ch_in, ch_mid, 1, act=act, track_running_stats=track_running_stats)
         self.convs = nn.Sequential()
 
         next_ch_in = ch_mid
@@ -459,14 +471,15 @@ class CSPStage(nn.Module):
                                            ch_mid,
                                            act=act,
                                            shortcut=True,
-                                           depthwise=depthwise))
+                                           depthwise=depthwise,
+                                           track_running_stats=track_running_stats))
             else:
                 raise NotImplementedError
             if i == (n - 1) // 2 and spp:
                 self.convs.add_module(
-                    'spp', SPP(ch_mid * 4, ch_mid, 1, [5, 9, 13], act=act))
+                    'spp', SPP(ch_mid * 4, ch_mid, 1, [5, 9, 13], act=act, track_running_stats=track_running_stats))
             next_ch_in = ch_mid
-        self.conv3 = ConvBNAct(ch_mid * n + ch_first, ch_out, 1, act=act)
+        self.conv3 = ConvBNAct(ch_mid * n + ch_first, ch_out, 1, act=act, track_running_stats=track_running_stats)
 
     def forward(self, x):
         y1 = self.conv1(x)
@@ -481,7 +494,7 @@ class CSPStage(nn.Module):
         return y
 
 
-def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
+def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1, track_running_stats=True):
     '''Basic cell for rep-style block, including conv and bn'''
     result = nn.Sequential()
     result.add_module(
@@ -493,7 +506,7 @@ def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
                   padding=padding,
                   groups=groups,
                   bias=False))
-    result.add_module('bn', nn.BatchNorm2d(num_features=out_channels))
+    result.add_module('bn', nn.BatchNorm2d(num_features=out_channels, track_running_stats=track_running_stats))
     return result
 
 
@@ -512,7 +525,8 @@ class RepConv(nn.Module):
                  padding_mode='zeros',
                  deploy=False,
                  act='relu',
-                 norm=None):
+                 norm=None,
+                 track_running_stats=True):
         super(RepConv, self).__init__()
         self.deploy = deploy
         self.groups = groups
@@ -547,13 +561,15 @@ class RepConv(nn.Module):
                                      kernel_size=kernel_size,
                                      stride=stride,
                                      padding=padding,
-                                     groups=groups)
+                                     groups=groups,
+                                     track_running_stats=track_running_stats)
             self.rbr_1x1 = conv_bn(in_channels=in_channels,
                                    out_channels=out_channels,
                                    kernel_size=1,
                                    stride=stride,
                                    padding=padding_11,
-                                   groups=groups)
+                                   groups=groups,
+                                   track_running_stats=track_running_stats)
 
     def forward(self, inputs):
         '''Forward process'''

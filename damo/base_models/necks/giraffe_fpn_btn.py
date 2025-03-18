@@ -16,6 +16,7 @@ class GiraffeNeckV2(nn.Module):
         spp=False,
         block_name='BasicBlock',
         depthwise=False,
+        track_running_stats=True
     ):
         super().__init__()
         self.in_features = in_features
@@ -26,7 +27,7 @@ class GiraffeNeckV2(nn.Module):
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
 
         # node x3: input x0, x1
-        self.bu_conv13 = Conv(in_channels[1], in_channels[1], 3, 2, act=act)
+        self.bu_conv13 = Conv(in_channels[1], in_channels[1], 3, 2, act=act, track_running_stats=track_running_stats)
         self.merge_3 = CSPStage(block_name,
                                 in_channels[1] + in_channels[2],
                                 hidden_ratio,
@@ -34,10 +35,11 @@ class GiraffeNeckV2(nn.Module):
                                 round(3 * depth),
                                 act=act,
                                 spp=spp,
-                                depthwise=depthwise)
+                                depthwise=depthwise,
+                                track_running_stats=track_running_stats)
 
         # node x4: input x1, x2, x3
-        self.bu_conv24 = Conv(in_channels[0], in_channels[0], 3, 2, act=act)
+        self.bu_conv24 = Conv(in_channels[0], in_channels[0], 3, 2, act=act, track_running_stats=track_running_stats)
         self.merge_4 = CSPStage(block_name,
                                 in_channels[0] + in_channels[1] +
                                 in_channels[2],
@@ -46,7 +48,8 @@ class GiraffeNeckV2(nn.Module):
                                 round(3 * depth),
                                 act=act,
                                 spp=spp,
-                                depthwise=depthwise)
+                                depthwise=depthwise,
+                                track_running_stats=track_running_stats)
 
         # node x5: input x2, x4
         self.merge_5 = CSPStage(block_name,
@@ -56,10 +59,11 @@ class GiraffeNeckV2(nn.Module):
                                 round(3 * depth),
                                 act=act,
                                 spp=spp,
-                                depthwise=depthwise)
+                                depthwise=depthwise,
+                                track_running_stats=track_running_stats)
 
         # node x7: input x4, x5
-        self.bu_conv57 = Conv(out_channels[0], out_channels[0], 3, 2, act=act)
+        self.bu_conv57 = Conv(out_channels[0], out_channels[0], 3, 2, act=act, track_running_stats=track_running_stats)
         self.merge_7 = CSPStage(block_name,
                                 out_channels[0] + in_channels[1],
                                 hidden_ratio,
@@ -67,11 +71,12 @@ class GiraffeNeckV2(nn.Module):
                                 round(3 * depth),
                                 act=act,
                                 spp=spp,
-                                depthwise=depthwise)
+                                depthwise=depthwise,
+                                track_running_stats=track_running_stats)
 
         # node x6: input x3, x4, x7
-        self.bu_conv46 = Conv(in_channels[1], in_channels[1], 3, 2, act=act)
-        self.bu_conv76 = Conv(out_channels[1], out_channels[1], 3, 2, act=act)
+        self.bu_conv46 = Conv(in_channels[1], in_channels[1], 3, 2, act=act, track_running_stats=track_running_stats)
+        self.bu_conv76 = Conv(out_channels[1], out_channels[1], 3, 2, act=act, track_running_stats=track_running_stats)
         self.merge_6 = CSPStage(block_name,
                                 in_channels[1] + out_channels[1] +
                                 in_channels[2],
@@ -80,7 +85,8 @@ class GiraffeNeckV2(nn.Module):
                                 round(3 * depth),
                                 act=act,
                                 spp=spp,
-                                depthwise=depthwise)
+                                depthwise=depthwise,
+                                track_running_stats=track_running_stats)
 
     def init_weights(self):
         pass

@@ -51,7 +51,8 @@ train = easydict({
 
 test = easydict({
     'augment': test_aug,           # augmentation config for testing
-    'batch_size': 128,             # testing batch size
+    'batch_size': 128,           # testing batch size
+    'bn_track_rinning_stats': True
 })
 
 dataset = easydict({

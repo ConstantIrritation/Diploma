@@ -33,6 +33,8 @@ class Config(MyConfig):
         self.dataset.train_ann = ('coco_2017_train', )
         self.dataset.val_ann = ('coco_2017_val', )
 
+        self.test.bn_track_running_stats = True
+
         # backbone
         structure = self.read_structure(
             './damo/base_models/backbones/nas_backbones/tinynas_L20_k1kx.txt')
@@ -44,6 +46,7 @@ class Config(MyConfig):
             'use_focus': True,
             'act': 'relu',
             'reparam': True,
+            'track_running_stats': self.test.bn_track_running_stats,
         }
 
         self.model.backbone = TinyNAS
@@ -57,6 +60,7 @@ class Config(MyConfig):
             'act': 'relu',
             'spp': False,
             'block_name': 'BasicBlock_3x3_Reverse',
+            'track_running_stats': self.test.bn_track_running_stats,
         }
 
         self.model.neck = GiraffeNeckV2

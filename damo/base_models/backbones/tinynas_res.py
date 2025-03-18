@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 
 from ..core.ops import Focus, RepConv, SPPBottleneck, get_activation
-
+from damo.base_models.backbones.BN import MyBatchNorm2d
 
 class ConvKXBN(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size, stride):
+    def __init__(self, in_c, out_c, kernel_size, stride, track_running_stats):
         super(ConvKXBN, self).__init__()
         self.conv1 = nn.Conv2d(in_c,
                                out_c,
@@ -15,7 +15,7 @@ class ConvKXBN(nn.Module):
                                stride, (kernel_size - 1) // 2,
                                groups=1,
                                bias=False)
-        self.bn1 = nn.BatchNorm2d(out_c)
+        self.bn1 = nn.BatchNorm2d(out_c, track_running_stats=track_running_stats)
 
     def forward(self, x):
         return self.bn1(self.conv1(x))
@@ -25,9 +25,9 @@ class ConvKXBN(nn.Module):
 
 
 class ConvKXBNRELU(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size, stride, act='silu'):
+    def __init__(self, in_c, out_c, kernel_size, stride, act='silu', track_running_stats=True):
         super(ConvKXBNRELU, self).__init__()
-        self.conv = ConvKXBN(in_c, out_c, kernel_size, stride)
+        self.conv = ConvKXBN(in_c, out_c, kernel_size, stride, track_running_stats)
         if act is None:
             self.activation_function = torch.relu
         else:
@@ -47,30 +47,33 @@ class ResConvBlock(nn.Module):
                  stride,
                  act='silu',
                  reparam=False,
-                 block_type='k1kx'):
+                 block_type='k1kx',
+                 track_running_stats=True):
         super(ResConvBlock, self).__init__()
         self.stride = stride
         if block_type == 'k1kx':
-            self.conv1 = ConvKXBN(in_c, btn_c, kernel_size=1, stride=1)
+            self.conv1 = ConvKXBN(in_c, btn_c, kernel_size=1, stride=1, track_running_stats=track_running_stats)
         else:
             self.conv1 = ConvKXBN(in_c,
                                   btn_c,
                                   kernel_size=kernel_size,
-                                  stride=1)
+                                  stride=1,
+                                  track_running_stats=track_running_stats)
 
         if not reparam:
-            self.conv2 = ConvKXBN(btn_c, out_c, kernel_size, stride)
+            self.conv2 = ConvKXBN(btn_c, out_c, kernel_size, stride, track_running_stats=track_running_stats)
         else:
             self.conv2 = RepConv(btn_c,
                                  out_c,
                                  kernel_size,
                                  stride,
-                                 act='identity')
+                                 act='identity',
+                                 track_running_stats=track_running_stats)
 
         self.activation_function = get_activation(act)
 
         if in_c != out_c and stride != 2:
-            self.residual_proj = ConvKXBN(in_c, out_c, 1, 1)
+            self.residual_proj = ConvKXBN(in_c, out_c, 1, 1, track_running_stats=track_running_stats)
         else:
             self.residual_proj = None
 
@@ -99,7 +102,8 @@ class SuperResStem(nn.Module):
                  with_spp=False,
                  act='silu',
                  reparam=False,
-                 block_type='k1kx'):
+                 block_type='k1kx',
+                 track_running_stats=True):
         super(SuperResStem, self).__init__()
         if act is None:
             self.act = torch.relu
@@ -124,11 +128,12 @@ class SuperResStem(nn.Module):
                                      this_stride,
                                      act=act,
                                      reparam=reparam,
-                                     block_type=block_type)
+                                     block_type=block_type,
+                                     track_running_stats=track_running_stats)
             self.block_list.append(the_block)
             if block_id == 0 and with_spp:
                 self.block_list.append(
-                    SPPBottleneck(out_channels, out_channels))
+                    SPPBottleneck(out_channels, out_channels, track_running_stats=track_running_stats))
 
     def forward(self, x):
         output = x
@@ -144,7 +149,8 @@ class TinyNAS(nn.Module):
                  with_spp=False,
                  use_focus=False,
                  act='silu',
-                 reparam=False):
+                 reparam=False,
+                 track_running_stats=True):
         super(TinyNAS, self).__init__()
         self.out_indices = out_indices
         self.block_list = nn.ModuleList()
@@ -156,13 +162,15 @@ class TinyNAS(nn.Module):
                     the_block = Focus(block_info['in'],
                                       block_info['out'],
                                       block_info['k'],
-                                      act=act)
+                                      act=act,
+                                      track_running_stats=track_running_stats)
                 else:
                     the_block = ConvKXBNRELU(block_info['in'],
                                              block_info['out'],
                                              block_info['k'],
                                              block_info['s'],
-                                             act=act)
+                                             act=act,
+                                             track_running_stats=track_running_stats)
                 self.block_list.append(the_block)
             elif the_block_class == 'SuperResConvK1KX':
                 spp = with_spp if idx == len(structure_info) - 1 else False
@@ -175,7 +183,8 @@ class TinyNAS(nn.Module):
                                          spp,
                                          act=act,
                                          reparam=reparam,
-                                         block_type='k1kx')
+                                         block_type='k1kx',
+                                         track_running_stats=track_running_stats)
                 self.block_list.append(the_block)
             elif the_block_class == 'SuperResConvKXKX':
                 spp = with_spp if idx == len(structure_info) - 1 else False
@@ -188,7 +197,8 @@ class TinyNAS(nn.Module):
                                          spp,
                                          act=act,
                                          reparam=reparam,
-                                         block_type='kxkx')
+                                         block_type='kxkx',
+                                         track_running_stats=track_running_stats)
                 self.block_list.append(the_block)
             else:
                 raise NotImplementedError
@@ -223,6 +233,7 @@ def load_tinynas_net(backbone_cfg):
                     with_spp=backbone_cfg.with_spp,
                     use_focus=backbone_cfg.use_focus,
                     act=backbone_cfg.act,
-                    reparam=backbone_cfg.reparam)
+                    reparam=backbone_cfg.reparam,
+                    track_running_stats=backbone_cfg.track_running_stats)
 
     return model
