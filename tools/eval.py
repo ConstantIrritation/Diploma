@@ -109,6 +109,16 @@ def main():
     logger.info('loading checkpoint from {}'.format(ckpt_file))
     loc = 'cuda:{}'.format(args.local_rank)
     ckpt = torch.load(ckpt_file, map_location=loc)
+
+    if not config.test.bn_track_running_stats:
+    to_del = []
+    for k, v in ckpt['model'].items():
+        if 'running_mean' in k or 'running_var' in k or 'num_batches_tracked' in k:
+            # del ckpt['model'][k]
+            to_del.append(k)
+    for k in to_del:
+        del ckpt['model'][k]
+
     new_state_dict = {}
     for k, v in ckpt['model'].items():
         k = k.replace('module', '')

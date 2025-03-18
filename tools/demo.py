@@ -73,6 +73,16 @@ class Infer():
         if engine_type == 'torch':
             model = build_local_model(config, self.device)
             ckpt = torch.load(self.ckpt_path, map_location=self.device)
+
+            if not config.test.bn_track_running_stats:
+                to_del = []
+                for k, v in ckpt['model'].items():
+                    if 'running_mean' in k or 'running_var' in k or 'num_batches_tracked' in k:
+                        # del ckpt['model'][k]
+                        to_del.append(k)
+                for k in to_del:
+                    del ckpt['model'][k]
+
             model.load_state_dict(ckpt['model'], strict=True)
             for layer in model.modules():
                 if isinstance(layer, RepConv):
