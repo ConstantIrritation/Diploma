@@ -111,13 +111,13 @@ def main():
     ckpt = torch.load(ckpt_file, map_location=loc)
 
     if not config.test.bn_track_running_stats:
-    to_del = []
-    for k, v in ckpt['model'].items():
-        if 'running_mean' in k or 'running_var' in k or 'num_batches_tracked' in k:
-            # del ckpt['model'][k]
-            to_del.append(k)
-    for k in to_del:
-        del ckpt['model'][k]
+        to_del = []
+        for k, v in ckpt['model'].items():
+            if 'running_mean' in k or 'running_var' in k or 'num_batches_tracked' in k:
+                # del ckpt['model'][k]
+                to_del.append(k)
+        for k in to_del:
+            del ckpt['model'][k]
 
     new_state_dict = {}
     for k, v in ckpt['model'].items():
@@ -126,9 +126,9 @@ def main():
     model.load_state_dict(new_state_dict, strict=False)
     logger.info('loaded checkpoint done.')
 
-    for layer in model.modules():
-        if isinstance(layer, RepConv):
-            layer.switch_to_deploy()
+    # for layer in model.modules():
+    #     if isinstance(layer, RepConv):
+    #         layer.switch_to_deploy()
 
     infer_shape = sum(config.test.augment.transform.image_max_range) // 2
     logger.info('Model Summary: {}'.format(get_model_info(model,

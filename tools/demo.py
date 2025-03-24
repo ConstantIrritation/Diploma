@@ -84,9 +84,9 @@ class Infer():
                     del ckpt['model'][k]
 
             model.load_state_dict(ckpt['model'], strict=True)
-            for layer in model.modules():
-                if isinstance(layer, RepConv):
-                    layer.switch_to_deploy()
+            # for layer in model.modules():
+            #     if isinstance(layer, RepConv):
+            #         layer.switch_to_deploy()
             model.eval()
         elif engine_type == 'tensorRT':
             model = self.build_tensorRT_engine(self.ckpt_path)
