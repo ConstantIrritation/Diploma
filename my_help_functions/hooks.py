@@ -10,6 +10,7 @@ import torch.nn as nn
 layer_outputs_fwd = {}
 layer_outputs_bck = {}
 bns = []
+convs = []
 
 def remove_all_hooks(model: torch.nn.Module) -> None:
     global layer_outputs_fwd
@@ -18,6 +19,8 @@ def remove_all_hooks(model: torch.nn.Module) -> None:
     layer_outputs_bck = {}
     global bns
     bns = []
+    global convs
+    convs = []
 
     for name, child in model._modules.items():
         if child is not None:
@@ -56,7 +59,7 @@ def register_hooks(model, layers, backward=False):
         return layer_outputs_fwd
 
 
-def hook_bn(module, input, output):
+def hook_bn_noname(module, input, output):
     global bns
     bns.append([module, input[0].squeeze(0), output.squeeze(0)])
 
@@ -65,5 +68,41 @@ def register_bn_hooks(model):
     remove_all_hooks(model)
     for name, layer in model.named_modules():
         if isinstance(layer, nn.BatchNorm2d):
-            layer.register_forward_hook(hook_bn)
+            layer.register_forward_hook(hook_bn_noname)
     return bns
+
+
+def hook_fn_fwd_batch(module, input, output):
+    print('forward hook used')
+    global layer_outputs_fwd
+    layer_outputs_fwd[module] = [input[0], output]
+
+
+def register_hooks_batch_forward(model, layers):
+    remove_all_hooks(model)
+    for layer_to_add in layers:
+        for name, layer in model.named_modules():
+            if layer_to_add in name:
+                print(f'add {layer_to_add}')
+                layer.register_forward_hook(hook_fn_fwd_batch)
+    return layer_outputs_fwd
+
+def hook_conv(name, module, input, output):
+    global convs
+    convs.append([name, module, input[0].squeeze(0), output.squeeze(0)])
+
+def hook_bn(name, module, input, output):
+    global bns
+    bns.append([name, module, input[0].squeeze(0), output.squeeze(0)])
+
+def register_conv_bn_hooks(model):
+    remove_all_hooks(model)
+    modules = list(model.named_modules())
+    for i in range(len(modules) - 1):
+        name1, layer1 = modules[i]
+        name2, layer2 = modules[i + 1]
+
+        if isinstance(layer1, nn.Conv2d) and isinstance(layer2, nn.BatchNorm2d):
+            layer1.register_forward_hook(lambda module, input, output, name=name1: hook_conv(name, module, input, output))
+            layer2.register_forward_hook(lambda module, input, output, name=name2: hook_bn(name, module, input, output))
+    return bns, convs
