@@ -4,6 +4,10 @@ from pathlib import Path
 import os
 from pycocotools.coco import COCO
 import json
+import matplotlib.pyplot as plt
+import scipy.cluster.hierarchy as sch
+from scipy.cluster.hierarchy import fcluster
+from matplotlib.colors import ListedColormap
 
 
 def get_positions_of_classes_on_flattened_image(name, size):
@@ -112,3 +116,42 @@ def get_positions_of_classes_on_flattened_image_for_collage(idx, size, pref="", 
     class_names = {i + 1: coco.loadCats(ann['category_id'])[0]['name'] if ann['category_id'] != 'background' else 'background' for (i, ann) in enumerate(annotations)}
 
     return positions, class_names
+
+
+def get_cluster_pixels(to_cluster, positions, class_names, size):
+    
+    n_clusters = 3
+    cluster_map_rgb = np.ones((size, size, 3)) * 0.8
+    cluster_map = np.zeros((size * size,), dtype=int)
+
+    custom_colormaps = {
+        3: ListedColormap(['#e41a1c', '#377eb8', '#4daf4a']),  # Красный, синий, зеленый
+        4: ListedColormap(['#984ea3', '#ff7f00', '#ffff33', '#a65628']),  # Фиолет, оранжевый и т.п.
+        2: ListedColormap(['#1b9e77', '#d95f02']),  # Зелёный, оранжевый
+    }
+
+    for class_id, data in enumerate(to_cluster, start=1):
+        if class_id not in positions:
+            continue
+        if class_names[class_id] == 'background':
+            continue
+
+        class_positions = positions[class_id]
+        if len(class_positions) <= n_clusters:
+            continue
+
+        linkage_matrix = sch.linkage(data, method='ward')
+        cluster_labels = fcluster(linkage_matrix, t=n_clusters, criterion='maxclust')
+
+        cluster_labels_2d = cluster_labels + cluster_map.max()
+        cluster_map[class_positions] = cluster_labels_2d
+
+        cluster_labels_rgb = cluster_labels - 1
+        cmap = custom_colormaps.get(n_clusters, plt.cm.get_cmap('tab10', n_clusters))
+
+        for i, pix_idx in enumerate(class_positions):
+            y, x = divmod(pix_idx, size)
+            cluster_map_rgb[y, x] = cmap(cluster_labels_rgb[i])[:3]
+
+    cluster_map_2d = cluster_map.reshape(size, size)
+    return cluster_map_2d, cluster_map_rgb

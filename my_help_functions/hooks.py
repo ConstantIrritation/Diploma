@@ -25,11 +25,11 @@ def remove_all_hooks(model: torch.nn.Module) -> None:
     for name, child in model._modules.items():
         if child is not None:
             if hasattr(child, "_forward_hooks"):
-                child._forward_hooks: Dict[int, Callable] = OrderedDict()
+                child._forward_hooks: Dict[int, Callable] = OrderedDict() # type: ignore
             elif hasattr(child, "_forward_pre_hooks"):
-                child._forward_pre_hooks: Dict[int, Callable] = OrderedDict()
+                child._forward_pre_hooks: Dict[int, Callable] = OrderedDict() # type: ignore
             elif hasattr(child, "_backward_hooks"):
-                child._backward_hooks: Dict[int, Callable] = OrderedDict()
+                child._backward_hooks: Dict[int, Callable] = OrderedDict() # type: ignore
             remove_all_hooks(child)
 
 
@@ -89,10 +89,12 @@ def register_hooks_batch_forward(model, layers):
 
 def hook_conv(name, module, input, output):
     global convs
+    print('add conv', name)
     convs.append([name, module, input[0].squeeze(0), output.squeeze(0)])
 
 def hook_bn(name, module, input, output):
     global bns
+    print('add bn', name)
     bns.append([name, module, input[0].squeeze(0), output.squeeze(0)])
 
 def register_conv_bn_hooks(model):
