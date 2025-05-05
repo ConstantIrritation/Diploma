@@ -83,18 +83,15 @@ def register_hooks_batch_forward(model, layers):
     for layer_to_add in layers:
         for name, layer in model.named_modules():
             if layer_to_add in name:
-                print(f'add {layer_to_add}')
                 layer.register_forward_hook(hook_fn_fwd_batch)
     return layer_outputs_fwd
 
 def hook_conv(name, module, input, output):
     global convs
-    print('add conv', name)
     convs.append([name, module, input[0].squeeze(0), output.squeeze(0)])
 
 def hook_bn(name, module, input, output):
     global bns
-    print('add bn', name)
     bns.append([name, module, input[0].squeeze(0), output.squeeze(0)])
 
 def register_conv_bn_hooks(model):
