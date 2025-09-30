@@ -12,6 +12,7 @@ from thop import profile
 __all__ = [
     'fuse_conv_and_bn',
     'fuse_model',
+    'fuse_bn_running_var',
     'get_model_info',
     'replace_module',
     'make_divisible'
@@ -120,6 +121,28 @@ def fuse_model(model):
             m.conv1 = fuse_conv_and_bn(m.conv1, m.bn1)  # update conv
             delattr(m, 'bn1')  # remove batchnorm
             m.forward = m.fuseforward  # update forward
+
+    return model
+
+def fuse_bn_running_var(model):
+    from damo.base_models.core.ops import ConvBNAct
+    from damo.base_models.backbones.tinynas_res import ConvKXBN
+
+    for m in model.modules():
+        if type(m) is ConvBNAct and hasattr(m, 'bn'):
+            conv = m.conv
+            bn = m.bn
+        elif type(m) is ConvKXBN and hasattr(m, 'bn1'):
+            conv = m.conv1
+            bn = m.bn1
+        else:
+            continue
+        assert not conv.bias
+        s = torch.div(1, torch.sqrt(bn.eps + bn.running_var))
+        conv.weight.data = torch.einsum('ijkl,i->ijkl', conv.weight.data, s)
+
+        bn.running_mean.mul_(s)
+        bn.running_var.fill_(1.)
 
     return model
 
