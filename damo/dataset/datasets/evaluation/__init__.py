@@ -20,7 +20,10 @@ def evaluate(dataset, predictions, output_folder, **kwargs):
                 predictions=predictions,
                 output_folder=output_folder,
                 **kwargs)
-    if isinstance(dataset, datasets.COCODataset):
+    # ======== 25-26 - новые ==========
+    if isinstance(dataset, datasets.COCODataset)\
+     or (hasattr(dataset, 'coco') and (hasattr(dataset, 'ids')\
+        or hasattr(dataset, 'img_ids'))):
         return coco_evaluation(**args)
     else:
         dataset_name = dataset.__class__.__name__
