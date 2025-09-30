@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 
 from ..core.ops import Focus, RepConv, SPPBottleneck, get_activation
-from damo.base_models.backbones.BN import MyBatchNorm2d
 
 class ConvKXBN(nn.Module):
     def __init__(self, in_c, out_c, kernel_size, stride, track_running_stats):

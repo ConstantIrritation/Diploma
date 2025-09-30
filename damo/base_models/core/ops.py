@@ -9,8 +9,6 @@ import torch.nn.functional as F
 from .weight_init import kaiming_init, constant_init
 from damo.utils import make_divisible
 
-from damo.base_models.backbones.BN import MyBatchNorm2d
-
 class SiLU(nn.Module):
     """export-friendly version of nn.SiLU()"""
     @staticmethod
