@@ -18,9 +18,38 @@ from damo.dataset import build_dataloader, build_dataset
 from damo.detectors.detector import build_local_model
 from damo.utils import fuse_model, setup_logger
 
-from my_help_functions.hooks import remove_all_hooks
+# from my_help_functions.hooks import remove_all_hooks
 import torch.nn.functional as F
 
+from collections import OrderedDict
+from typing import Dict, Callable
+import torch
+import torch.nn as nn
+
+layer_outputs_fwd = {}
+layer_outputs_bck = {}
+bns = []
+convs = []
+
+def remove_all_hooks(model: torch.nn.Module) -> None:
+    global layer_outputs_fwd
+    layer_outputs_fwd = {}
+    global layer_outputs_bck
+    layer_outputs_bck = {}
+    global bns
+    bns = []
+    global convs
+    convs = []
+
+    for name, child in model._modules.items():
+        if child is not None:
+            if hasattr(child, "_forward_hooks"):
+                child._forward_hooks: Dict[int, Callable] = OrderedDict() # type: ignore
+            if hasattr(child, "_forward_pre_hooks"):
+                child._forward_pre_hooks: Dict[int, Callable] = OrderedDict() # type: ignore
+            if hasattr(child, "_backward_hooks"):
+                child._backward_hooks: Dict[int, Callable] = OrderedDict() # type: ignore
+            remove_all_hooks(child)
 
 def mkdir(path: str):
     if path and not os.path.exists(path):
@@ -194,16 +223,10 @@ def build_alphabetical_subset(ds, n: int):
     return DatasetView(ds, selected)
 
 
-def hook_bn_modified(name):
-    """
-    Модифицированный хук для BatchNorm слоя - только применяет scale и shift
-    """
-    def hook_fn(module, input, output):
-        
-        modified_output = input[0] * module.weight.view(1, -1, 1, 1) + module.bias.view(1, -1, 1, 1)
-                
+def hook_bn_affine(name):
+    def hook_fn(module, input, output):   
+        modified_output = input[0] * module.weight.view(1, -1, 1, 1) + module.bias.view(1, -1, 1, 1)      
         return modified_output
-    
     return hook_fn
 
 def precompute_pre_center(model):
@@ -215,42 +238,32 @@ def precompute_pre_center(model):
         if isinstance(conv, nn.Conv2d) and isinstance(bn, nn.BatchNorm2d):
             with torch.no_grad():
 
-                # W = conv.weight       # [out_ch, in_ch, kH, kW]
-                # out_ch, in_ch, kH, kW = W.shape
-                # center = bn.running_mean
-                # W_eff = W.view(W.size()[0], W.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
-                # W_pinv = torch.pinverse(W_eff)        # [in_ch, out_ch]
-                # center_before = W_pinv @ center
-                # conv.register_buffer("_pre_center", center_before)
+                W = conv.weight       # [out_ch, in_ch, kH, kW]
+                out_ch, in_ch, kH, kW = W.shape
+                center = bn.running_mean
 
-                # W = conv.weight       # [out_ch, in_ch, kH, kW]
-                # out_ch, in_ch, kH, kW = W.shape
-                # center = bn.running_mean
+                W_eff = W.view(W.size()[0], W.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
+                W_pinv = torch.pinverse(W_eff)        # [in_ch, out_ch]
+                center_before = W_pinv @ center
+
                 # W_fl = W.flatten(1)
                 # W_pinv = torch.pinverse(W_fl)        # [k * k * in_ch, out_ch]
                 # center_before = W_pinv @ center
                 # center_before = center_before.view(in_ch, kH * kW).mean(1)
-                # conv.register_buffer("_pre_center", center_before)
 
-                W = conv.weight       # [out_ch, in_ch, kH, kW]
-                out_ch, in_ch, kH, kW = W.shape
-                center = bn.running_mean
-                W_fl = W.flatten(1)
-                U, S, Vh = torch.svd(W_fl)
-                U_inv = torch.pinverse(U)
-                print(Vh.size(), out_ch, in_ch, kH, kW)
-                Vh_inv = torch.pinverse(Vh)
-                print(Vh_inv.size(), U_inv.size())
-                Vh_inv = Vh_inv.view(Vh_inv.size()[0], in_ch, kH, kW).mean(dim=(2, 3)).permute(1, 0)
-                center_before_U = U_inv @ center
-                center_before_S = center_before_U / S
-                center_before_Vh = Vh_inv @ center_before_S
+                # W_fl = W.flatten(1)
+                # U, S, Vh = torch.svd(W_fl)
+                # U_inv = torch.pinverse(U)
+                # Vh_inv = torch.pinverse(Vh)
+                # Vh_inv = Vh_inv.view(Vh_inv.size()[0], in_ch, kH, kW).mean(dim=(2, 3)).permute(1, 0)
+                # center_before_U = U_inv @ center
+                # center_before_S = center_before_U / S
+                # center_before = Vh_inv @ center_before_S
 
-                conv.register_buffer("_pre_center", center_before_Vh)
+                conv.register_buffer("_pre_center", center_before)
 
 
-
-def hook_conv_modified_pre(name, bn_layer):
+def hook_conv_change_conv_center(name, bn_layer):
     def hook_fn(module, input, output):
         with torch.no_grad():
             x = input[0]
@@ -270,18 +283,14 @@ def hook_conv_modified_pre(name, bn_layer):
             if module.bias is not None:
                 y = y + module.bias.view(1, -1, 1, 1)
 
-            # BN scale
+            # BN center norm
             # y = y - bn_layer.running_mean.view(1, -1, 1, 1)
             y = y / torch.sqrt(bn_layer.running_var.view(1, -1, 1, 1) + bn_layer.eps)
             return y
 
     return hook_fn
 
-def register_conv_bn_hooks_modified(model):
-    """
-    Регистрирует модифицированные хуки для всех пар conv-bn
-    """
-    
+def register_hooks_change_conv_center(model):
     remove_all_hooks(model)
     modules = list(model.named_modules())
 
@@ -292,183 +301,11 @@ def register_conv_bn_hooks_modified(model):
         name2, layer2 = modules[i + 1]
         
         if isinstance(layer1, nn.Conv2d) and isinstance(layer2, nn.BatchNorm2d):
-            layer1.register_forward_hook(hook_conv_modified_pre(name1, layer2))
-            layer2.register_forward_hook(hook_bn_modified(name2))
-
-
-'''
-def svd_forward_hook_conv(name, keep_ratio, bn_layer):
-    """
-    Хук для Conv2d: аппроксимация весов через усечённое SVD.
-    keep_ratio — доля сингулярных компонент, которые нужно оставить (0..1).
-    """
-    def hook_fn(module, input, output):
-        with torch.no_grad():
-            W = module.weight       # [out_ch, in_ch, kH, kW]
-            out_ch, in_ch, kH, kW = W.shape
-            W_flat = W.view(out_ch, -1) # [out_ch, in_ch * kH * kW]
-            U, S, Vh = torch.svd(W_flat)
-            rank = max(1, int(len(S) * keep_ratio))
-
-            center = bn_layer.running_mean
-
-            U_r = U[:, :rank]
-            S_r = S[:rank]
-            Vh_r = Vh[:, :rank]
-            W_approx = (U_r @ torch.diag(S_r) @ Vh_r.T).view_as(W)
-
-            x = input[0]
-
-            # W_eff = W_approx.view(W_approx.size()[0], W_approx.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
-            # W_pinv = torch.pinverse(W_eff)
-            # center_before_conv = W_pinv @ center
-
-            # signal_after_center = x - center_before_conv.view(1, -1, 1, 1)
-
-            # x = F.conv2d(
-            #     signal_after_center, W_approx, module.bias,
-            #     stride=module.stride,
-            #     padding=module.padding,
-            #     dilation=module.dilation,
-            #     groups=module.groups
-            # )
-
-            # modified_output = x / torch.sqrt(bn_layer.running_var.view(1, -1, 1, 1) + bn_layer.eps)
-            # return modified_output
-
-            dotp = torch.abs(U_r.T @ center)
-            correlated   = torch.nonzero(dotp >= S_r[-1], as_tuple=True)[0]
-            uncorrelated = torch.nonzero(dotp <  S_r[-1], as_tuple=True)[0]
-
-            # =========== correlated =============
-
-            U_corr = U_r[:, correlated]
-            S_corr = S_r[correlated]
-            Vh_corr = Vh_r[:, correlated]
-
-            # W_correlated = (U_corr @ torch.diag(S_corr) @ Vh_corr.T).view_as(W_approx)
-
-            # W_eff = W_correlated.view(W_correlated.size()[0], W_correlated.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
-            # W_pinv = torch.pinverse(W_eff)
-            # center_before_conv_corr = W_pinv @ center
-
-            # signal_corr_after_center = x - center_before_conv_corr.view(1, -1, 1, 1)
-
-            # signal_after_conv_correlated = F.conv2d(
-            #     signal_corr_after_center, W_correlated, module.bias,
-            #     stride=module.stride,
-            #     padding=module.padding,
-            #     dilation=module.dilation,
-            #     groups=module.groups
-            # )
-            
-
-            
-            W1_corr = Vh_corr.T.contiguous().view(len(correlated), in_ch // module.groups, kH, kW)
-            signal_after_hidden_conv_corr = F.conv2d(x, W1_corr,
-                                                      stride=module.stride,
-                                                      padding=module.padding,
-                                                      dilation=module.dilation,
-                                                      groups=module.groups
-                                                      )
-
-            W2_corr = (U_corr * S_corr).contiguous().view(out_ch, len(correlated), 1, 1)
-            # signal_after_conv_correlated = F.conv2d(signal_after_hidden_conv_corr, W2_corr,
-            #                                  stride=1,
-            #                                  padding=0,
-            #                                  bias=module.bias
-            #                                  )
-
-            # ------------ center ----------------
-            W_eff = W2_corr.view(W2_corr.size()[0], W2_corr.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
-            W_pinv = torch.pinverse(W_eff)
-            center_before_conv_corr = W_pinv @ center
-
-            signal_corr_after_center = signal_after_hidden_conv_corr - center_before_conv_corr.view(1, -1, 1, 1)
-            signal_after_conv_correlated = F.conv2d(signal_corr_after_center, W2_corr,
-                                             stride=1,
-                                             padding=0,
-                                             bias=module.bias
-                                             )
-            
-            # ================== uncorrelated =================================
-            U_uncorr = U_r[:, uncorrelated]
-            S_uncorr = S_r[uncorrelated]
-            Vh_uncorr = Vh_r[:, uncorrelated]
-
-            # W_uncorrelated = (U_uncorr @ torch.diag(S_uncorr) @ Vh_uncorr.T).view_as(W_approx)
-
-            # W_eff = W_uncorrelated.view(W_uncorrelated.size()[0], W_uncorrelated.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
-            # W_pinv = torch.pinverse(W_eff)
-            # center_before_conv_uncorr = W_pinv @ center
-
-            # signal_uncorr_after_center = x - center_before_conv_uncorr.view(1, -1, 1, 1)
-
-            # signal_after_conv_uncorrelated = F.conv2d(
-            #     signal_uncorr_after_center, W_uncorrelated, module.bias,
-            #     stride=module.stride,
-            #     padding=module.padding,
-            #     dilation=module.dilation,
-            #     groups=module.groups
-            # )
-            
-            
-            W1_uncorr = Vh_uncorr.T.contiguous().view(len(uncorrelated), in_ch // module.groups, kH, kW)
-            signal_after_hidden_conv_uncorr = F.conv2d(x, W1_uncorr,
-                                                      stride=module.stride,
-                                                      padding=module.padding,
-                                                      dilation=module.dilation,
-                                                      groups=module.groups
-                                                      )
-
-            W2_uncorr = (U_uncorr * S_uncorr).contiguous().view(out_ch, len(uncorrelated), 1, 1)
-            # signal_after_conv_uncorrelated = F.conv2d(signal_after_hidden_conv_uncorr, W2_uncorr,
-            #                                  stride=1,
-            #                                  padding=0,
-            #                                  bias=module.bias
-            #                                  )
-
-            # ---------- center ----------
-            W_eff = W2_uncorr.view(W2_uncorr.size()[0], W2_uncorr.size()[1], -1).sum(dim=2)  # shape: [out_ch, in_ch]
-            W_pinv = torch.pinverse(W_eff)
-            center_before_conv_uncorr = W_pinv @ center
-
-
-            signal_uncorr_after_center = signal_after_hidden_conv_uncorr # - center_before_conv_uncorr.view(1, -1, 1, 1)
-            signal_after_conv_uncorrelated = F.conv2d(signal_uncorr_after_center, W2_uncorr,
-                                             stride=1,
-                                             padding=0,
-                                             bias=module.bias
-                                             )
-            
-            # ============ final ================================================================
-            output = signal_after_conv_correlated + signal_after_conv_uncorrelated 
-            # modified_output = (output - bn_layer.running_mean.view(1, -1, 1, 1)) \
-            # / torch.sqrt(bn_layer.running_var.view(1, -1, 1, 1) + bn_layer.eps)
-            modified_output = output / torch.sqrt(bn_layer.running_var.view(1, -1, 1, 1) + bn_layer.eps)
-
-            print('uncorr center -1: ', torch.norm(center_before_conv_uncorr))
-            print('corr center -1: ', torch.norm(center_before_conv_corr))
-            print('center', torch.norm(center))
-            print(*list(map(torch.norm, (W1_corr, W2_corr, W1_uncorr, W2_uncorr))))
-
-            return modified_output
-
-    return hook_fn
-
-def register_svd_hooks(model, layers, keep_ratio):
-    remove_all_hooks(model)
-    for layer_to_add in layers:
-        for name, layer in model.named_modules():
-            if layer_to_add in name:
-                layer.register_forward_hook(lambda m, inp, out: svd_forward_hook(m, inp, out, keep_ratio=keep_ratio))
-'''
+            layer1.register_forward_hook(hook_conv_change_conv_center(name1, layer2))
+            layer2.register_forward_hook(hook_bn_affine(name2))
 
 
 def precompute_svd_weights(model, keep_ratio):
-    global counter_1x1
-    global counter_3x3
-
     modules = list(model.named_modules())
     for i in range(len(modules) - 1):
         name1, conv = modules[i]
@@ -484,8 +321,6 @@ def precompute_svd_weights(model, keep_ratio):
                 # W_flat = W.view(W.size()[0], W.size()[1], -1).sum(dim=2)
 
                 U, S, Vh = torch.svd(W_flat)
-                # print(U.size(), S.size(), Vh.size(), W.size())
-
 
                 # ------ adaptive kepp_ratio ----------
                 # n = torch.sum(S)
@@ -521,22 +356,20 @@ def precompute_svd_weights(model, keep_ratio):
                 # correlated   = torch.nonzero(dotp >= S_r[rank - 1], as_tuple=True)[0]
                 # uncorrelated = torch.nonzero(dotp <  S_r[rank - 1], as_tuple=True)[0]
 
-                print(len(correlated), len(uncorrelated), rank, len(S) - rank)
+                # print(len(correlated), len(uncorrelated), rank, len(S) - rank)
 
                 # -------- helper для сборки пути --------
                 def make_path(idx):
                     if idx.numel() == 0:
                         return None
-                    U_sel = U_r[:, idx]                    # [out_ch, rc]
-                    S_sel = S_r[idx]                       # [rc]
-                    V_sel = Vh_r[:, idx]                    # [in_dim, rc]
+                    U_sel = U_r[:, idx]  # [out_ch, rc]
+                    S_sel = S_r[idx]     # [rc]
+                    V_sel = Vh_r[:, idx] # [in_dim, rc]
 
-                    # первый conv
                     W1 = V_sel.T.contiguous().view(idx.numel(),
                                                    in_ch // conv.groups,
                                                    kH, kW)  # [rc, in_ch/groups, kH, kW]
 
-                    # второй conv (1x1)
                     W2 = (U_sel * S_sel).contiguous().view(out_ch, idx.numel(), 1, 1)
 
                     # центр до conv2
@@ -566,17 +399,25 @@ def precompute_svd_weights(model, keep_ratio):
                     conv.register_buffer("_W2_uncorr", W2_uncorr)
                     conv.register_buffer("_center_uncorr", c_uncorr)
 
+                conv.register_buffer("_correlated_idx", correlated)
+                conv.register_buffer("_uncorrelated_idx", uncorrelated)
 
-def svd_forward_hook_conv_pre(name, bn_layer):
-    """
-    Хук для Conv2d: аппроксимация весов через усечённое SVD.
-    keep_ratio — доля сингулярных компонент, которые нужно оставить (0..1).
-    """
+
+def hook_conv_corr_uncorr(name, bn_layer):
     def hook_fn(module, input, output):
         with torch.no_grad():
+            global layer_outputs_fwd
+
             center = bn_layer.running_mean
             x = input[0]
             y = None
+
+            conv_orig = output.detach().cpu() if isinstance(output, torch.Tensor) else None
+            rec = {
+                "conv_out": conv_orig,
+                "bn_center": center.detach().cpu(),
+                }
+
 
             if getattr(module, "_has_corr", False):
                 y_corr_hidden = F.conv2d(
@@ -593,6 +434,12 @@ def svd_forward_hook_conv_pre(name, bn_layer):
                                   stride=1, padding=0, dilation=1, groups=1)
                 y = y_corr if y is None else (y + y_corr)
 
+                rec.update({
+                    "center_corr": module._center_corr.detach().cpu() if isinstance(module._center_corr, torch.Tensor) else None,
+                    "y_corr_hidden": y_corr_hidden.detach().cpu(),
+                    "y_corr": y_corr.detach().cpu(),
+                })
+
             if getattr(module, "_has_uncorr", False):
                 y_uncorr_hidden = F.conv2d(
                     x, module._W1_uncorr, None,
@@ -601,32 +448,186 @@ def svd_forward_hook_conv_pre(name, bn_layer):
                     dilation=module.dilation,
                     groups=module.groups
                 )
-                # центр можно тоже вычесть, если нужно
-                # if module._center_uncorr is not None:
-                #     y_uncorr_hidden = y_uncorr_hidden - module._center_uncorr.view(1, -1, 1, 1)
+                if module._center_uncorr is not None:
+                    y_uncorr_hidden = y_uncorr_hidden - module._center_uncorr.view(1, -1, 1, 1)
 
                 y_uncorr = F.conv2d(y_uncorr_hidden, module._W2_uncorr, None,
                                     stride=1, padding=0, dilation=1, groups=1)
                 y = y_uncorr if y is None else (y + y_uncorr)
 
-            if y is None:
-                # fallback: слой занулен
-                y = F.conv2d(x, module.weight*0, None,
-                             stride=module.stride, padding=module.padding,
-                             dilation=module.dilation, groups=module.groups)
+                rec.update({
+                    "center_uncorr": module._center_uncorr.detach().cpu() if isinstance(module._center_uncorr, torch.Tensor) else None,
+                    "y_uncorr_hidden": y_uncorr_hidden.detach().cpu(),
+                    "y_uncorr": y_uncorr.detach().cpu(),
+                })
 
             if module.bias is not None:
                 y = y + module.bias.view(1, -1, 1, 1)
 
-            # BN scale
+            # BN center norm
             # y = y - bn_layer.running_mean.view(1, -1, 1, 1)
             y = y / torch.sqrt(bn_layer.running_var.view(1, -1, 1, 1) + bn_layer.eps)
+
+            if hasattr(module, "_correlated_idx"):
+                try:
+                    rec["correlated_idx"] = module._correlated_idx.detach().cpu()
+                except Exception:
+                    rec["correlated_idx"] = module._correlated_idx
+
+            if hasattr(module, "_uncorrelated_idx"):
+                try:
+                    rec["uncorrelated_idx"] = module._uncorrelated_idx.detach().cpu()
+                except Exception:
+                    rec["uncorrelated_idx"] = module._uncorrelated_idx
+
+            layer_outputs_fwd[name] = rec
+
             return y
 
     return hook_fn
 
 
-def register_svd_hooks(model, layers, keep_ratio):
+# def hook_conv_corr_uncorr(name, bn_layer, keep_ratio):
+    # def hook_fn(module, input, output):
+    #     with torch.no_grad():
+    #         x = input[0]                              # [N, C_in, H, W]
+    #         device = x.device
+
+    #         # --- get precomputed SVD buffers or fallback ---
+    #         if hasattr(module, "_W_flat") and hasattr(module, "_Vh_r"):
+    #             W_flat = module._W_flat              # [out_ch, in_dim]
+    #             Vh_r = module._Vh_r                 # [in_dim, rank]
+    #             rank = module._svd_rank.item()
+    #             U_r = module._U_r if hasattr(module, "_U_r") else None
+    #             S_r = module._S_r if hasattr(module, "_S_r") else None
+    #         else:
+    #             W = module.weight
+    #             out_ch, in_ch, kH, kW = W.shape
+    #             W_flat = W.view(out_ch, -1)
+    #             U, S, Vh = torch.svd(W_flat)
+    #             rank = max(1, int(len(S) * keep_ratio))
+    #             Vh_r = Vh[:, :rank].to(device)
+    #             U_r = U[:, :rank].to(device)
+    #             S_r = S[:rank].to(device)
+
+    #         out_ch, in_dim = W_flat.shape
+    #         N, C_in, H_in, W_in = x.shape
+    #         kH, kW = module.kernel_size
+
+    #         # --- unfold input to patches ---
+    #         unfold = torch.nn.Unfold(kernel_size=(kH, kW),
+    #                                  dilation=module.dilation,
+    #                                  padding=module.padding,
+    #                                  stride=module.stride)
+    #         X = unfold(x)                     # [N, in_dim, L]
+    #         N, in_dim2, L = X.shape
+    #         assert in_dim2 == in_dim
+
+    #         # --- project patches onto span(Vh_r) and compute orthogonal part ---
+    #         X_mat = X.permute(1, 0, 2).reshape(in_dim, -1)   # [in_dim, N*L]
+            
+    #         # Коэффициенты проекции на span(Vh_r)
+    #         c = Vh_r.t() @ X_mat                             # [rank, N*L]
+            
+    #         # ========== ПРАВИЛЬНОЕ ВЫЧИСЛЕНИЕ СВЕРТКИ ==========
+    #         # Используем факторизованную форму: W_r = U_r @ diag(S_r) @ Vh_r.T
+    #         # Тогда: W_r @ X = U_r @ diag(S_r) @ (Vh_r.T @ X) = U_r @ diag(S_r) @ c
+            
+    #         Y_proj_mat = U_r @ (S_r.unsqueeze(1) * c)       # [out_ch, N*L]
+            
+    #         # Для полной свертки тоже используем факторизацию (при keep_ratio=1.0 должно совпадать)
+    #         # Но для диагностики посчитаем через W_flat
+    #         Y_full_mat = W_flat @ X_mat                      # [out_ch, N*L]
+            
+    #         # Ортогональная компонента: применяем W_r к ортогональной части входа
+    #         # W_r @ X_orth = U_r @ diag(S_r) @ (Vh_r.T @ X_orth)
+    #         # Но Vh_r.T @ X_orth ≈ 0 по построению!
+    #         c_orth = Vh_r.t() @ (X_mat - Vh_r @ c)           # должно быть ≈ 0
+    #         Y_orth_mat = U_r @ (S_r.unsqueeze(1) * c_orth)   # должно быть ≈ 0
+            
+    #         # ДИАГНОСТИКА 1: проверяем ортогональность
+    #         X_proj_mat = Vh_r @ c
+    #         X_orth_mat = X_mat - X_proj_mat
+    #         inner_product = (X_proj_mat * X_orth_mat).sum(dim=0).mean().cpu().item()
+            
+    #         # ДИАГНОСТИКА 2: проверяем, что Vh_r^T @ X_orth ≈ 0
+    #         c_orth_norm = c_orth.abs().mean().cpu().item()
+            
+    #         # Проверка реконструкции: при keep_ratio=1.0 должно быть Y_proj ≈ Y_full
+    #         Y_sum_mat = Y_proj_mat + Y_orth_mat
+    #         reconstruction_error = (Y_full_mat - Y_proj_mat).abs().mean().cpu().item()
+    #         sum_reconstruction_error = (Y_full_mat - Y_sum_mat).abs().mean().cpu().item()
+            
+    #         # Reshape обратно
+    #         Y_full = Y_full_mat.reshape(out_ch, N, L).permute(1, 0, 2).contiguous()
+    #         Y_proj = Y_proj_mat.reshape(out_ch, N, L).permute(1, 0, 2).contiguous()
+    #         Y_orth = Y_orth_mat.reshape(out_ch, N, L).permute(1, 0, 2).contiguous()
+
+    #         # --- fold patch-outputs into spatial maps ---
+    #         H_out = (H_in + 2*module.padding[0] - module.dilation[0]*(kH-1) - 1)//module.stride[0] + 1
+    #         W_out = (W_in + 2*module.padding[1] - module.dilation[1]*(kW-1) - 1)//module.stride[1] + 1
+    #         fold_out = torch.nn.Fold(output_size=(H_out, W_out), kernel_size=(1,1), stride=1)
+
+    #         y_full = fold_out(Y_full.permute(0,2,1).reshape(N, out_ch, L))
+    #         y_proj = fold_out(Y_proj.permute(0,2,1).reshape(N, out_ch, L))
+    #         y_orth = fold_out(Y_orth.permute(0,2,1).reshape(N, out_ch, L))
+
+    #         # --- add bias ---
+    #         if module.bias is not None:
+    #             b = module.bias.view(1, -1, 1, 1).to(device)
+    #             y_full = y_full + b
+    #             y_proj = y_proj + b
+    #             y_orth = y_orth + b
+
+    #         # --- МЕТРИКИ БЕЗ ЦЕНТРИРОВАНИЯ (для чистой диагностики) ---
+    #         norm_orth_raw = y_orth.abs().mean().cpu().item()
+    #         norm_full_raw = y_full.abs().mean().cpu().item()
+    #         norm_proj_raw = y_proj.abs().mean().cpu().item()
+    #         diff_raw = (y_full - y_proj - y_orth).abs().mean().cpu().item()
+            
+    #         # --- CENTERING: только для y_proj! ---
+    #         # y_full = y_proj + y_orth
+    #         # y_full - center = (y_proj - center) + y_orth
+    #         # Поэтому центрируем только y_proj, y_orth остается как есть!
+    #         center = bn_layer.running_mean.to(device).view(1, -1, 1, 1)
+    #         y_full_c  = y_full  - center
+    #         y_proj_c  = y_proj  - center
+    #         y_orth_c  = y_orth  # НЕ вычитаем center!
+
+    #         # --- МЕТРИКИ ПОСЛЕ ЦЕНТРИРОВАНИЯ ---
+    #         norm_orth_centered = y_orth_c.abs().mean().cpu().item()
+    #         diff_after_centering = (y_full_c - y_proj_c - y_orth_c).abs().mean().cpu().item()
+            
+    #         print(f"[{name}] rank={rank}, in_dim={in_dim}, out_ch={out_ch}")
+    #         print(f"  Проекция: <X_proj,X_orth>={inner_product:.3e}, |Vh_r^T*X_orth|={c_orth_norm:.3e}")
+    #         print(f"  Свертка (raw): |Y_orth|={norm_orth_raw:.3e}, |Y_proj|={norm_proj_raw:.3e}, |Y_full|={norm_full_raw:.3e}")
+    #         print(f"  Разность: |Y_full - Y_proj|={reconstruction_error:.3e}, |Y_full - Y_proj - Y_orth|={sum_reconstruction_error:.3e}")
+    #         print(f"  Разность: |Y_full - Y_proj|={(y_full - y_proj).abs().mean().cpu().item():.3e}")
+    #         print(f"  После центрир: |Y_orth|={norm_orth_centered:.3e}, |Y_proj_c|={y_proj_c.abs().mean().cpu().item():.3e}")
+    #         print(f"  Проверка: |Y_full_c - Y_proj_c - Y_orth_c|={diff_after_centering:.3e}")
+            
+    #         # --- final output: возвращаем нормализованный y_proj ---
+    #         y = y_proj_c
+    #         y = y / torch.sqrt(bn_layer.running_var.view(1, -1, 1, 1).to(device) + bn_layer.eps)
+            
+    #         # ДИАГНОСТИКА: сравним с оригинальным output
+    #         original_output = output
+    #         print(f"  Output сравнение: |original|={original_output.abs().mean().cpu().item():.3e}, |modified|={y.abs().mean().cpu().item():.3e}")
+    #         print(f"  Difference: |original - modified|={(original_output - y).abs().mean().cpu().item():.3e}")
+
+    #         # cleanup
+    #         del X, X_mat, X_proj_mat, X_orth_mat, c, c_orth
+    #         del Y_full_mat, Y_proj_mat, Y_orth_mat, Y_sum_mat
+    #         del Y_full, Y_proj, Y_orth
+    #         del y_full, y_proj, y_orth, y_full_c, y_proj_c, y_orth_c
+    #         torch.cuda.empty_cache()
+
+    #         return y
+
+    # return hook_fn
+
+
+def register_hooks_corr_uncorr(model, layers, keep_ratio):
     remove_all_hooks(model)
     modules = list(model.named_modules())
 
@@ -636,14 +637,12 @@ def register_svd_hooks(model, layers, keep_ratio):
         name1, layer1 = modules[i]
         name2, layer2 = modules[i + 1]
 
-        # if name1 in layers:
-        if isinstance(layer1, nn.Conv2d) and isinstance(layer2, nn.BatchNorm2d):
-            layer1.register_forward_hook(svd_forward_hook_conv_pre(name1, layer2))
-            layer2.register_forward_hook(hook_bn_modified(name2))
-            # layer1.register_forward_hook(lambda module, input, output, name=name1: hook_conv(name, module, input, output))
-            # layer2.register_forward_hook(lambda module, input, output, name=name2: hook_bn(name, module, input, output))
-    # return bns, convs
+        if name1 in layers:
+        # if isinstance(layer1, nn.Conv2d) and isinstance(layer2, nn.BatchNorm2d):
+            layer1.register_forward_hook(hook_conv_corr_uncorr(name1, layer2))
+            layer2.register_forward_hook(hook_bn_affine(name2))
 
+    return layer_outputs_fwd
 
 
 @logger.catch
@@ -689,20 +688,20 @@ def main():
     model.load_state_dict(new_state_dict, strict=False)
     logger.info('loaded checkpoint done.')
 
-    # for layer in model.modules():
-    #     if isinstance(layer, RepConv):
-    #         layer.switch_to_deploy()
+    for layer in model.modules():
+        if isinstance(layer, RepConv):
+            layer.switch_to_deploy()
 
     # ==== hooks and change order of operations ====
-    register_conv_bn_hooks_modified(model)
+    # register_hooks_change_conv_center(model)
     # ==============================================
 
     # ==== hooks for svd ============
-    # layers_to_add = ['backbone.block_list.3.block_list.0.conv1.conv1']
+    layers_to_add = ['backbone.block_list.3.block_list.0.conv1.conv1']
     # layers_to_add = ['backbone.block_list.3.block_list.0.conv2.rbr_dense.conv']
     # layers_to_add += ['neck.merge_7.conv1.conv']
 
-    # register_svd_hooks(model, layers_to_add, 0.95)
+    register_hooks_corr_uncorr(model, layers_to_add, 1.)
     # ===============================
 
     if args.fuse:
