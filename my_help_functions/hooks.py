@@ -3,9 +3,11 @@
 
 
 from collections import OrderedDict
-from typing import Dict, Callable
+from typing import Callable, Dict
+
 import torch
 import torch.nn as nn
+
 
 layer_outputs_fwd = {}
 layer_outputs_bck = {}

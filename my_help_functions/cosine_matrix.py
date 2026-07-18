@@ -1,13 +1,14 @@
-import cv2
-import numpy as np
-from pathlib import Path
-import os
-from pycocotools.coco import COCO
 import json
+import os
+from pathlib import Path
+
+import cv2
 import matplotlib.pyplot as plt
+import numpy as np
 import scipy.cluster.hierarchy as sch
-from scipy.cluster.hierarchy import fcluster
 from matplotlib.colors import ListedColormap
+from pycocotools.coco import COCO
+from scipy.cluster.hierarchy import fcluster
 
 
 def get_positions_of_classes_on_flattened_image(name, size):
@@ -125,9 +126,9 @@ def get_cluster_pixels(to_cluster, positions, class_names, size):
     cluster_map = np.zeros((size * size,), dtype=int)
 
     custom_colormaps = {
-        3: ListedColormap(['#e41a1c', '#377eb8', '#4daf4a']),  # Красный, синий, зеленый
-        4: ListedColormap(['#984ea3', '#ff7f00', '#ffff33', '#a65628']),  # Фиолет, оранжевый и т.п.
-        2: ListedColormap(['#1b9e77', '#d95f02']),  # Зелёный, оранжевый
+        3: ListedColormap(['#e41a1c', '#377eb8', '#4daf4a']),
+        4: ListedColormap(['#984ea3', '#ff7f00', '#ffff33', '#a65628']),
+        2: ListedColormap(['#1b9e77', '#d95f02']),
     }
 
     for class_id, data in enumerate(to_cluster, start=1):
